@@ -77,6 +77,95 @@ install_package() {
     fi
 }
 
+install_helm() {
+
+    if command -v helm >/dev/null 2>&1; then
+        log_info "Helm déjà installé."
+        return 0
+    fi
+
+    log_info "Installation de Helm depuis GitHub..."
+
+    local version
+    version=$(curl -s https://api.github.com/repos/helm/helm/releases/latest | jq -r '.tag_name')
+
+    cd "$TMP_DIR"
+
+    curl -L -o helm.tar.gz \
+        "https://get.helm.sh/helm-${version}-linux-amd64.tar.gz"
+
+    tar -xzf helm.tar.gz
+
+    sudo install -m 755 linux-amd64/helm /usr/local/bin/helm
+
+    helm version --short
+}
+
+install_k3s() {
+
+    if kubectl cluster-info >/dev/null 2>&1; then
+        log_info "Cluster Kubernetes déjà accessible."
+        return
+    fi
+
+    log_info "Aucun cluster détecté. Installation de k3s..."
+
+    curl -sfL https://get.k3s.io | sh -
+
+    mkdir -p "$HOME/.kube"
+
+    sudo cp /etc/rancher/k3s/k3s.yaml "$HOME/.kube/config"
+
+    sudo chown "$(id -u):$(id -g)" "$HOME/.kube/config"
+
+    export KUBECONFIG="$HOME/.kube/config"
+
+    log_info "Attente du démarrage de k3s..."
+
+    for i in {1..30}
+    do
+        if kubectl get nodes >/dev/null 2>&1; then
+            log_info "Cluster Kubernetes prêt."
+            return
+        fi
+
+        sleep 2
+    done
+
+    log_error "Le cluster k3s ne répond pas."
+    exit 1
+}
+
+install_kubectl() {
+
+    if command -v kubectl >/dev/null 2>&1; then
+        log_info "kubectl déjà installé : $(kubectl version --client --short 2>/dev/null || echo OK)"
+        return 0
+    fi
+
+    log_info "kubectl n'est pas installé. Installation..."
+
+    local version
+    version=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
+
+    curl -fsSL \
+        -o "${TMP_DIR}/kubectl" \
+        "https://dl.k8s.io/release/${version}/bin/linux/amd64/kubectl"
+
+    chmod +x "${TMP_DIR}/kubectl"
+
+    sudo install -m 0755 \
+        "${TMP_DIR}/kubectl" \
+        /usr/local/bin/kubectl
+
+    if command -v kubectl >/dev/null 2>&1; then
+        log_info "kubectl installé : $(kubectl version --client --short 2>/dev/null || echo OK)"
+    else
+        log_error "Échec de l'installation de kubectl."
+        exit 1
+    fi
+}
+
 check_dependencies() {
 
     declare -A packages=(
@@ -95,6 +184,8 @@ check_dependencies() {
         fi
     done
 
+    install_helm
+    install_kubectl
     log_info "Toutes les dépendances sont installées."
 }
 
@@ -162,6 +253,7 @@ install_release() {
 main() {
 
     check_dependencies
+    install_k3s
 
     for entry in "${REPOS[@]}"
     do
@@ -174,7 +266,10 @@ main() {
 
     echo
     log_info "Téléchargement terminé."
-    echo
+    log_info "Starting all projects..."
+    log_info "Starting scloud-observability..."
+    cd scloud-observability
+    ./deploy-scloud-observability.sh
 }
 
 main "$@"
