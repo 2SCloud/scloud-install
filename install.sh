@@ -247,6 +247,86 @@ install_release() {
 }
 
 ################################################################################
+# GRAFANA ACCESS
+################################################################################
+
+configure_grafana_ingress_dns() {
+
+    local HOSTNAME="observability.scloud.moe"
+
+    log_info "Configuration DNS local ${HOSTNAME}..."
+
+    local IP
+
+    IP=$(kubectl get nodes \
+        -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+
+    if grep -qi microsoft /proc/version 2>/dev/null; then
+
+        log_info "WSL détecté"
+
+        if powershell.exe -Command "
+\$hosts='C:\Windows\System32\drivers\etc\hosts'
+
+if (Test-Path \$hosts) {
+
+    \$content = Get-Content \$hosts -ErrorAction SilentlyContinue
+
+    \$newContent = \$content | Where-Object { \$_ -notmatch '${HOSTNAME}' }
+
+    Set-Content -Path \$hosts -Value \$newContent
+
+    Add-Content -Path \$hosts -Value '${IP} ${HOSTNAME}'
+}
+" >/dev/null 2>&1; then
+
+            log_info "Entrée hosts Windows configurée."
+
+        else
+
+            log_warn "Impossible de modifier automatiquement le fichier hosts Windows."
+
+            echo
+            log_warn "Ouvrez PowerShell en Administrateur puis exécutez :"
+            echo
+            echo "Add-Content C:\Windows\System32\drivers\etc\hosts '${IP} ${HOSTNAME}'"
+            echo
+        fi
+
+    elif [[ "$OSTYPE" == "darwin"* ]]; then
+
+        if grep -q "${HOSTNAME}" /etc/hosts 2>/dev/null; then
+
+            sudo sed -i '' "/${HOSTNAME}/d" /etc/hosts
+        fi
+
+        echo "${IP} ${HOSTNAME}" | sudo tee -a /etc/hosts >/dev/null
+
+        log_info "Entrée hosts macOS configurée."
+
+    else
+
+        if grep -q "${HOSTNAME}" /etc/hosts 2>/dev/null; then
+
+            sudo sed -i "/${HOSTNAME}/d" /etc/hosts
+        fi
+
+        echo "${IP} ${HOSTNAME}" | sudo tee -a /etc/hosts >/dev/null
+
+        log_info "Entrée hosts Linux configurée."
+    fi
+}
+
+wait_for_grafana() {
+
+    log_info "Attente du déploiement Grafana..."
+
+    kubectl rollout status deployment/grafana \
+        -n scloud-observability \
+        --timeout=300s || true
+}
+
+################################################################################
 # MAIN
 ################################################################################
 
@@ -264,15 +344,13 @@ main() {
             "$folder"
     done
 
-    echo
-    log_info "Installing Kubernetes dashboard..."
-    kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.7.0/aio/deploy/recommended.yaml
-    kubectl proxy --address=0.0.0.0 --accept-hosts='.*' >/tmp/kubectl-proxy.log 2>&1 &
     log_info "Téléchargement terminé."
     log_info "Starting all projects..."
     log_info "Starting scloud-observability..."
     cd scloud-observability
     ./deploy-scloud-observability.sh
+    wait_for_grafana
+    configure_grafana_ingress_dns
 
     cd ../scloud-dns
     echo "Vérification du namespace scloud-dns..."
@@ -284,15 +362,20 @@ main() {
     fi
     kubectl apply -f k3s/scloud-dns.yaml
 
-    echo "Creating the admin user for the dashboard..."
+    echo
+    log_info "Installing Kubernetes dashboard..."
+    kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.7.0/aio/deploy/recommended.yaml
+    kubectl proxy --address=0.0.0.0 --accept-hosts='.*' >/tmp/kubectl-proxy.log 2>&1 &
+    log_info "Creating the admin user for the dashboard..."
     kubectl create serviceaccount admin-user -n kubernetes-dashboard
     kubectl create clusterrolebinding admin-user --clusterrole=cluster-admin --serviceaccount=kubernetes-dashboard:admin-user
     TOKEN=$(kubectl -n kubernetes-dashboard create token admin-user)
 
     echo
     log_info "Endpoints:"
-    log_info "\tDashboard: http://localhost:8001/api/v1/namespaces/kubernetes-dashboard/services/https:kubernetes-dashboard:/proxy/"
-    log_info "\t\tTOKEN: ${TOKEN}"
+    log_info "  Dashboard: http://localhost:8001/api/v1/namespaces/kubernetes-dashboard/services/https:kubernetes-dashboard:/proxy/"
+    log_info "    TOKEN: ${TOKEN}"
+    log_info "  Grafana: http://observability.scloud.moe"
 }
 
 main "$@"
