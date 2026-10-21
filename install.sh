@@ -265,11 +265,34 @@ main() {
     done
 
     echo
+    log_info "Installing Kubernetes dashboard..."
+    kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.7.0/aio/deploy/recommended.yaml
+    kubectl proxy --address=0.0.0.0 --accept-hosts='.*' >/tmp/kubectl-proxy.log 2>&1 &
     log_info "Téléchargement terminé."
     log_info "Starting all projects..."
     log_info "Starting scloud-observability..."
     cd scloud-observability
     ./deploy-scloud-observability.sh
+
+    cd ../scloud-dns
+    echo "Vérification du namespace scloud-dns..."
+    if ! kubectl get namespace scloud-dns >/dev/null 2>&1; then
+        echo "Création du namespace scloud-dns..."
+        kubectl create namespace scloud-dns
+    else
+        echo "✅ Namespace scloud-dns déjà existant"
+    fi
+    kubectl apply -f k3s/scloud-dns.yaml
+
+    echo "Creating the admin user for the dashboard..."
+    kubectl create serviceaccount admin-user -n kubernetes-dashboard
+    kubectl create clusterrolebinding admin-user --clusterrole=cluster-admin --serviceaccount=kubernetes-dashboard:admin-user
+    TOKEN=$(kubectl -n kubernetes-dashboard create token admin-user)
+
+    echo
+    log_info "Endpoints:"
+    log_info "\tDashboard: http://localhost:8001/api/v1/namespaces/kubernetes-dashboard/services/https:kubernetes-dashboard:/proxy/"
+    log_info "\t\tTOKEN: ${TOKEN}"
 }
 
 main "$@"
