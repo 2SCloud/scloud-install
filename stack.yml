@@ -1,0 +1,30 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# 2SCloud stack: component versions deployed by install.sh
+#
+#   ./install.sh                              → deploys the versions below
+#   CHANNEL=beta ./install.sh                 → deploys stack-beta.yml instead
+#   STACK_FILE=stack-dev.yml ./install.sh     → another stack file
+#   SCLOUD_DNS_VERSION=0.3.0 ./install.sh     → override one component
+#                                               (<COMPONENT>_VERSION, upper-case, - → _)
+#
+# "latest" resolves to the latest GitHub release of the component.
+# The "Update stack" workflow opens a PR here for every new release of a
+# component (versions only: a branch like "main" is never changed).
+#
+# Keep this format: top-level keys are components, one "key: value" per line below.
+# ──────────────────────────────────────────────────────────────────────────────
+
+scloud-dns:
+  # Git tag of 2SCloud/scloud-dns, also used as the tag of the deployed image
+  version: 0.3.0-1
+  image: ghcr.io/2scloud/scloud-dns
+
+scloud-observability:
+  # Git tag of 2SCloud/scloud-observability
+  version: 0.1.1.3
+
+scloud-edge-gateway:
+  # Git ref of 2SCloud/scloud-edge-gateway (branch, tag or commit). The
+  # edge-gateway and frontend images are built from it, and the scloud-compute
+  # manifests follow the submodule commit pinned by this ref.
+  version: main
