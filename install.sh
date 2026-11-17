@@ -13,11 +13,29 @@ VERSION_FILE="${TMP_DIR}/.task-version"   # tasks write the version they fetched
 # Full log of every command (stdout + stderr): shown on failure
 LOG_FILE="${LOG_FILE:-${BASE_DIR}/scloud-install.log}"
 
-# Downloaded releases (unchanged)
+# Downloaded releases (folder = component name in the stack file)
 REPOS=(
     "2SCloud/scloud-dns|scloud-dns"
     "2SCloud/scloud-observability|scloud-observability"
 )
+
+# Component versions: see stack.yml (releases) and stack-beta.yml (betas).
+#   CHANNEL=beta ./install.sh               → stack-beta.yml
+#   STACK_FILE=stack-dev.yml ./install.sh   → another stack file
+#   SCLOUD_DNS_VERSION=0.3.0 ./install.sh   → override one component
+CHANNEL="${CHANNEL:-stable}"
+case "$CHANNEL" in
+    stable) STACK_NAME="stack.yml" ;;
+    beta)   STACK_NAME="stack-beta.yml" ;;
+    *)      echo "Unknown CHANNEL '${CHANNEL}' (stable or beta)." >&2; exit 1 ;;
+esac
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+STACK_FILE="${STACK_FILE:-${SCRIPT_DIR}/${STACK_NAME}}"
+# Used when the stack file is not next to install.sh (e.g. curl ... | bash)
+STACK_URL="${STACK_URL:-https://raw.githubusercontent.com/2SCloud/scloud-install/main/${STACK_NAME}}"
+declare -A STACK_VERSION=()   # release folder → resolved tag, set by resolve_stack
+PLATFORM_REF=""               # git ref of PLATFORM_REPO, set by resolve_stack
+DNS_IMAGE=""                  # scloud-dns image repository, set by resolve_stack
 
 # Parent repo: scloud-edge-gateway (edge-gateway Dockerfile + frontend/).
 # scloud-compute (manifests + legacy deploy.sh) is embedded in it: it is the
@@ -576,6 +594,93 @@ get_latest_tag() {
 }
 
 ################################################################################
+# STACK FILE (component versions)
+################################################################################
+
+# stack_get <component> <key> → value of "<key>:" under the top-level "<component>:"
+stack_get() {
+    awk -v comp="$1" -v key="$2" '
+        /^[ \t]*(#|$)/ { next }
+        /^[^ \t]/      { c = $0; sub(/:.*/, "", c); next }
+        c == comp {
+            line = $0
+            sub(/^[ \t]+/, "", line)
+            k = line
+            sub(/[ \t]*:.*/, "", k)
+            if (k != key) next
+            v = line
+            sub(/^[^:]*:[ \t]*/, "", v)
+            sub(/[ \t]+#.*$/, "", v)
+            sub(/[ \t]+$/, "", v)
+            if (v ~ /^".*"$/ || v ~ /^'\''.*'\''$/) v = substr(v, 2, length(v) - 2)
+            print v
+            exit
+        }
+    ' "$STACK_FILE"
+}
+
+# component_version <component> → <COMPONENT>_VERSION env var, else the stack file
+component_version() {
+    local var="${1^^}_VERSION"
+    var="${var//-/_}"
+
+    if [[ -n "${!var:-}" ]]; then
+        printf '%s' "${!var}"
+    else
+        stack_get "$1" version
+    fi
+}
+
+resolve_stack() {
+
+    if [[ ! -f "$STACK_FILE" ]]; then
+        if [[ "$STACK_FILE" != "${SCRIPT_DIR}/${STACK_NAME}" ]]; then
+            log_error "Stack file not found: ${STACK_FILE}"
+            exit 1
+        fi
+
+        log_warn "No ${STACK_NAME} next to install.sh, using ${STACK_URL}"
+        STACK_FILE="${TMP_DIR}/${STACK_NAME}"
+
+        if ! curl -fsSL "$STACK_URL" -o "$STACK_FILE"; then
+            log_error "Could not download ${STACK_URL}"
+            exit 1
+        fi
+    fi
+
+    log_info "Stack file: ${STACK_FILE}"
+
+    local entry repo folder version line
+    for entry in "${REPOS[@]}"
+    do
+        IFS='|' read -r repo folder <<< "$entry"
+
+        version="$(component_version "$folder")"
+
+        if [[ -z "$version" || "$version" == "latest" ]]; then
+            version="$(get_latest_tag "$repo" || true)"
+        fi
+
+        if [[ -z "$version" || "$version" == "null" ]]; then
+            log_error "No version for ${folder}: not in the stack file and no release found for ${repo}."
+            exit 1
+        fi
+
+        STACK_VERSION[$folder]="$version"
+        printf -v line '  %-22s %s' "$folder" "$version"
+        log_info "$line"
+    done
+
+    PLATFORM_REF="$(component_version scloud-edge-gateway)"
+    PLATFORM_REF="${PLATFORM_REF:-main}"
+    printf -v line '  %-22s %s' "scloud-edge-gateway" "$PLATFORM_REF"
+    log_info "$line"
+
+    DNS_IMAGE="$(stack_get scloud-dns image)"
+    DNS_IMAGE="${DNS_IMAGE:-ghcr.io/2scloud/scloud-dns}"
+}
+
+################################################################################
 # INSTALLATION
 ################################################################################
 
@@ -583,21 +688,9 @@ install_release() {
 
     local repo="$1"
     local folder="$2"
+    local tag="${STACK_VERSION[$folder]}"
 
-    log_info "Downloading ${repo}"
-
-    local tag
-
-    tag=$(get_latest_tag "$repo")
-
-    if [[ -z "$tag" || "$tag" == "null" ]]; then
-
-        log_error "Release not found for ${repo}"
-        return 1
-
-    fi
-
-    log_info "Release detected: ${tag}"
+    log_info "Downloading ${repo} @ ${tag}"
     report_version "$tag"
 
     local archive_file
@@ -630,16 +723,34 @@ _git_pull() {
     report_version "$(_repo_version "$1")"
 }
 
+# _git_sync <url> <dir> <ref>: clones if needed, then checks out <ref>.
+# A branch is fast-forwarded to origin; a tag or commit gives a detached HEAD.
+_git_sync() {
+    local url="$1" dir="$2" ref="$3"
+
+    if [[ ! -d "${dir}/.git" ]]; then
+        git "${GIT_HTTPS[@]}" clone "$url" "$dir" || return 1
+    elif ! git "${GIT_HTTPS[@]}" -C "$dir" fetch --tags --force origin; then
+        echo "Fetch failed: using the refs already present locally." >&2
+    fi
+
+    if git -C "$dir" show-ref --verify --quiet "refs/remotes/origin/${ref}"; then
+        git -C "$dir" checkout "$ref" -- || return 1
+        git -C "$dir" merge --ff-only "origin/${ref}" \
+            || echo "Local ${ref} has diverged from origin: keeping the local version." >&2
+    else
+        git -C "$dir" -c advice.detachedHead=false checkout --detach "$ref" -- || return 1
+    fi
+
+    report_version "$(_repo_version "$dir")"
+}
+
 clone_platform_repo() {
 
     export GIT_TERMINAL_PROMPT=0
 
-    if [[ -d "${PLATFORM_DIR}/.git" ]]; then
-        run_soft "Updating ${PLATFORM_REPO}" _git_pull "$PLATFORM_DIR"
-    else
-        run "Cloning ${PLATFORM_REPO}" \
-            _git_clone "https://github.com/${PLATFORM_REPO}.git" "$PLATFORM_DIR"
-    fi
+    run "Fetching ${PLATFORM_REPO} @ ${PLATFORM_REF}" \
+        _git_sync "https://github.com/${PLATFORM_REPO}.git" "$PLATFORM_DIR" "$PLATFORM_REF"
 
     run_soft "Git submodules (SSH → HTTPS)" \
         git "${GIT_HTTPS[@]}" -C "$PLATFORM_DIR" submodule update --init --recursive
@@ -900,6 +1011,40 @@ _patch_coredns() {
         "$REPO_ROOT/dns/coredns/coredns-patch.yaml" | kubectl apply -f -
 }
 
+# _apply_dns_pinned <file|dir>: kubectl apply with every ${DNS_IMAGE}:<tag> image
+# replaced by the scloud-dns version of the stack file (*.yaml / *.yml only).
+_apply_dns_pinned() {
+    local path="$1" f
+    local image="${DNS_IMAGE}:${STACK_VERSION[scloud-dns]}"
+    local re="(image:[[:space:]]*[\"']?)${DNS_IMAGE//./\\.}:[^\"'[:space:]]+"
+    local -a files=()
+
+    if [[ -d "$path" ]]; then
+        for f in "$path"/*.yaml "$path"/*.yml; do
+            if [[ -f "$f" ]]; then files+=("$f"); fi
+        done
+    else
+        files=("$path")
+    fi
+
+    if (( ${#files[@]} == 0 )); then
+        echo "No manifest found in ${path}" >&2
+        return 1
+    fi
+
+    if ! grep -qE "$re" "${files[@]}"; then
+        echo "No ${DNS_IMAGE} image in ${path}: manifests applied unchanged." >&2
+    fi
+
+    report_version "$image"
+
+    for f in "${files[@]}"; do
+        printf -- '---\n'
+        sed -E "s#${re}#\\1${image}#" "$f"
+        printf '\n'
+    done | kubectl apply -f -
+}
+
 deploy_dns() {
 
     step "2/5  Deploying scloud-dns"
@@ -912,7 +1057,7 @@ deploy_dns() {
         run "scloud-dns: RBAC"             _retry 3 kubectl apply -f "$REPO_ROOT/dns/rbac/"
         run "scloud-dns: network policies" _retry 3 kubectl apply -f "$REPO_ROOT/dns/network/"
         run "scloud-dns: configuration"    _retry 3 kubectl apply -f "$REPO_ROOT/dns/config/"
-        run "scloud-dns: workloads"        _retry 3 kubectl apply -f "$REPO_ROOT/dns/workloads/"
+        run "scloud-dns: workloads"        _retry 3 _apply_dns_pinned "$REPO_ROOT/dns/workloads/"
 
         run "CoreDNS: stub zone scloud.internal" _patch_coredns
         log_detail "CoreDNS will hot-reload the stub zone via the reload plugin (~30s)"
@@ -921,7 +1066,7 @@ deploy_dns() {
 
         log_warn "dns/ manifests not found in the platform, using the scloud-dns release."
         run "scloud-dns: release manifest" \
-            _retry 3 kubectl apply -f "$BASE_DIR/scloud-dns/k3s/scloud-dns.yaml"
+            _retry 3 _apply_dns_pinned "$BASE_DIR/scloud-dns/k3s/scloud-dns.yaml"
         skip "Detailed scloud-dns steps (not applicable)" 5
 
     fi
@@ -1068,6 +1213,9 @@ main() {
     check_dependencies
     install_k3s
     install_cert_manager
+
+    step "Stack versions"
+    resolve_stack
 
     step "Downloading releases"
     local entry repo folder
