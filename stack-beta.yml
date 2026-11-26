@@ -2,7 +2,8 @@
 # 2SCloud stack, beta channel: CHANNEL=beta ./install.sh
 #
 # Same format as stack.yml. The "Update stack" workflow opens a PR here for
-# every new beta (X.Y.Z-beta.N, built from develop) and every new release.
+# every new beta (X.Y.Z-beta.<build number>, built from develop) and every new
+# release. A component pinned to a branch (e.g. "main") is never updated.
 # ──────────────────────────────────────────────────────────────────────────────
 
 scloud-dns:
@@ -15,5 +16,5 @@ scloud-observability:
   version: 0.1.1.3
 
 scloud-edge-gateway:
-  # Git ref of 2SCloud/scloud-edge-gateway (branch, tag or commit)
-  version: main
+  # Git tag of 2SCloud/scloud-edge-gateway (a branch or commit is never updated)
+  version: 0.2.0
