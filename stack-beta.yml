@@ -8,7 +8,7 @@
 
 scloud-dns:
   # Git tag of 2SCloud/scloud-dns, also used as the tag of the deployed image
-  version: 0.3.2-beta.19
+  version: 0.3.2-beta.22
   image: ghcr.io/2scloud/scloud-dns
 
 scloud-observability:
