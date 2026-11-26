@@ -24,7 +24,8 @@ scloud-observability:
   version: 0.1.1.3
 
 scloud-edge-gateway:
-  # Git ref of 2SCloud/scloud-edge-gateway (branch, tag or commit). The
-  # edge-gateway and frontend images are built from it, and the scloud-compute
-  # manifests follow the submodule commit pinned by this ref.
-  version: main
+  # Git tag of 2SCloud/scloud-edge-gateway. A branch or a commit also works, but
+  # is then never updated by the bot. The edge-gateway and frontend images are
+  # built from it, and the scloud-compute manifests follow the submodule commit
+  # pinned by this ref.
+  version: 0.2.0
